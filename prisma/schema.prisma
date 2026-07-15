@@ -1,0 +1,421 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────
+// USER
+// ─────────────────────────────────────────────────────────────
+
+model UserAuth {
+  id        String   @id @default(uuid())
+  email     String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // Connection state
+  githubConnected   Boolean @default(false)
+  githubAccessToken String?
+  githubLogin       String? // resolved on first GitHub sync
+  linkedinImported  Boolean @default(false)
+  linkedinZipPath   String? // path to uploaded ZIP for processing
+  onboardingStage   String  @default("new")
+  analysisStatus    String  @default("idle") // idle | running | success | failed
+  analysisError     String? // error message if analysis failed
+  portfolioTemplateId String? // e.g. "p1", "p2", "p3"
+  resumeTemplateId    String? // e.g. "r1", "r2"
+
+  /** Top portfolio projects chosen in onboarding (5–6 UUIDs, ordered) */
+  selectedProjectIds      String[]  @default([])
+  /** Set when user finishes the per-project quiz (persistent completion flag) */
+  onboardingQuizCompletedAt DateTime?
+  /** Set when user confirms template preview and saves final summary/bullets/skills */
+  onboardingOutputFinalizedAt DateTime?
+
+  // Relations
+  profile        UserProfile?
+  oauth          OAuthAccount[]
+  projects       Project[]
+  skills         Skill[]
+  experiences    Experience[]
+  educations     Education[]
+  awards         Award[]
+  certifications Certification[]
+  summary        UserSummary?
+  portfolio      UserPortfolio?
+  jobPreferences JobPreferences?
+  jobMatches      JobMatch[]
+  tailoredResumes TailoredResume[]
+  embedding       UserEmbedding?
+  workflowRuns    WorkflowRun[]
+}
+
+model UserProfile {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  user      UserAuth @relation(fields: [userId], references: [id])
+  name      String?
+  avatarUrl String?
+  profileImageUrl String?  // Cloudinary URL for user-uploaded profile image
+}
+
+model OAuthAccount {
+  id             String   @id @default(uuid())
+  userId         String
+  provider       String
+  providerUserId String
+  accessToken    String?
+  user           UserAuth @relation(fields: [userId], references: [id])
+
+  @@unique([provider, providerUserId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// GITHUB PIPELINE → Projects
+// ─────────────────────────────────────────────────────────────
+
+model Project {
+  id     String   @id @default(uuid())
+  userId String
+  user   UserAuth @relation(fields: [userId], references: [id])
+
+  name          String
+  repoUrl       String
+  domain        String?  // Frontend | Backend | ML | DevOps | Mobile
+  projectType   String   // "solo" | "collaborative"
+  collaborators Int      @default(1)
+  techStack     String[] // ordered by usage
+  /** Repo ranking score from GitHub analysis (for top-10 ordering) */
+  rankingScore  Float?
+  /** Cloudinary URL for optional project screenshot/image */
+  imageUrl      String?
+
+  // Raw GitHub metadata (for AI context)
+  stars           Int       @default(0)
+  forks           Int       @default(0)
+  repoDescription String?   @db.Text
+  readmeExcerpt   String?   @db.Text   // First 15 lines of README
+  lastPushedAt    DateTime?
+  repoSize        Int       @default(0)
+
+  // AI-generated enrichments (filled by single batch LLM call)
+  aiDescription   String?   @db.Text   // 2-3 sentence AI description
+  aiSkills        String[]  @default([])
+  aiComplexity    String?              // beginner | intermediate | advanced
+  aiUniqueAngle   String?   @db.Text   // What makes this project unique
+
+  // User quiz (onboarding)
+  projectIntent      String?
+  /** JSON: [{ "type": string, "value": number|null, "unit": string }] */
+  impactEntries      Json?
+  contributionArea   String?
+  quizExtraNotes     String?  @db.Text
+
+  // Two-stage bullets:
+  //   baseBullets  → AI-generated (no user metrics yet)
+  //   finalBullets → metrics injected after quiz
+  // description = denormalized single string for resume/portfolio display
+  baseBullets  String[]
+  finalBullets String[]
+  description  String?  @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([userId, repoUrl]) // enables idempotent upsert on re-analysis
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// SHARED → Skills  (GitHub primary + LinkedIn supplementary)
+// ─────────────────────────────────────────────────────────────
+
+model Skill {
+  id     String   @id @default(uuid())
+  userId String
+  user   UserAuth @relation(fields: [userId], references: [id])
+
+  name   String  // normalized, e.g. "React", "Node.js", "Python"
+  domain String? // Frontend | Backend | ML | DevOps | Mobile | Other
+  source String  // "github" | "linkedin" | "both"
+
+  @@unique([userId, name])
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// LINKEDIN PIPELINE → Experience, Education, Award, Certification
+// ─────────────────────────────────────────────────────────────
+
+model Experience {
+  id     String   @id @default(uuid())
+  userId String
+  user   UserAuth @relation(fields: [userId], references: [id])
+
+  role        String
+  company     String
+  startDate   String?  // "Jan 2022" — kept as LinkedIn string
+  endDate     String?  // null = present
+  description String?  @db.Text // AI-refined, resume-ready
+
+  @@index([userId])
+}
+
+model Education {
+  id     String   @id @default(uuid())
+  userId String
+  user   UserAuth @relation(fields: [userId], references: [id])
+
+  institution String
+  degree      String?
+  field       String?
+  startDate   String?
+  endDate     String?
+  gpa         String?
+
+  @@index([userId])
+}
+
+model Award {
+  id     String   @id @default(uuid())
+  userId String
+  user   UserAuth @relation(fields: [userId], references: [id])
+
+  title       String
+  description String? @db.Text
+  issuedAt    String?
+
+  @@index([userId])
+}
+
+model Certification {
+  id     String   @id @default(uuid())
+  userId String
+  user   UserAuth @relation(fields: [userId], references: [id])
+
+  name     String
+  issuer   String?
+  issuedAt String?
+
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// COMBINED OUTPUT → Summary, Portfolio
+// ─────────────────────────────────────────────────────────────
+
+model UserSummary {
+  id     String   @id @default(uuid())
+  userId String   @unique
+  user   UserAuth @relation(fields: [userId], references: [id])
+
+  summaryText   String  @db.Text
+  primaryDomain String? // dominant domain across both pipelines
+
+  updatedAt DateTime @updatedAt
+}
+
+model UserPortfolio {
+  id     String   @id @default(uuid())
+  userId String   @unique
+  user   UserAuth @relation(fields: [userId], references: [id])
+
+  publicEmail   String
+  githubUrl     String?
+  linkedinUrl   String?
+  websiteUrl    String?
+  portfolioSlug String   @unique
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model JobPreferences {
+  id     String   @id @default(uuid())
+  userId String   @unique
+  user   UserAuth @relation(fields: [userId], references: [id])
+
+  primaryRole      String
+  secondaryRoles   String[]  @default([])
+  workType         String
+  locations        String[]  @default([])
+  minSalary        Float     @default(0)
+  currency         String    @default("INR")
+  experienceLevel  String
+  jobType          String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+// Add to existing schema.prisma
+
+model Job {
+  id          String   @id @default(uuid())
+  title       String
+  company     String
+  location    String
+  description String   @db.Text
+  postedAt    DateTime @map("posted_at")
+  link        String   @unique
+  rawData     Json?    @map("raw_data")
+  
+  // Semantic embedding (Phase 2)
+  embedding   Float[]   @default([])
+  embeddedAt  DateTime? @map("embedded_at")
+  
+  createdAt   DateTime @default(now())
+  
+  matches     JobMatch[]
+  resumes     TailoredResume[]
+  
+  @@index([postedAt])
+  @@map("Job")
+}
+
+model JobMatch {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  jobId       String   @map("job_id")
+  matchScore  Int      @map("match_score") // 0-100
+  
+  // Semantic matching fields (Phase 2)
+  semanticScore Float?  @map("semantic_score")
+  keywordScore  Float?  @map("keyword_score")
+  matchMethod   String  @default("keyword") @map("match_method")
+  
+  user        UserAuth @relation(fields: [userId], references: [id])
+  job         Job      @relation(fields: [jobId], references: [id])
+  
+  createdAt   DateTime @default(now())
+  
+  @@unique([userId, jobId])
+  @@index([userId, matchScore])
+  @@map("JobMatch")
+}
+
+model TailoredResume {
+  id          String   @id @default(uuid())
+  userId      String   @map("user_id")
+  jobId       String   @map("job_id")
+  resumeUrl   String   @map("resume_url")
+  
+  // RAG pipeline fields (Phase 2)
+  atsScore    Int?      @map("ats_score")
+  iterations  Int       @default(1)
+  ragSources  String[]  @default([])
+  agentLog    Json?     @map("agent_log")
+  
+  user        UserAuth @relation(fields: [userId], references: [id])
+  job         Job      @relation(fields: [jobId], references: [id])
+  
+  createdAt   DateTime @default(now())
+  
+  @@unique([userId, jobId])
+  @@index([userId])
+  @@map("TailoredResume")
+}
+
+// ─────────────────────────────────────────────────────────────
+// WORKFLOW RUNS → Track n8n trigger lifecycle
+// ─────────────────────────────────────────────────────────────
+
+model WorkflowRun {
+  id            String    @id @default(uuid())
+  userId        String    @map("user_id")
+  requestId     String    @unique @map("request_id")
+  triggerType   String    @default("manual") @map("trigger_type")   // "manual" | "cron"
+  status        String    @default("pending")                       // pending | processing | completed | failed
+  error         String?   @db.Text
+  resultSummary Json?     @map("result_summary")
+
+  startedAt     DateTime  @default(now()) @map("started_at")
+  completedAt   DateTime? @map("completed_at")
+
+  user          UserAuth  @relation(fields: [userId], references: [id])
+
+  @@index([userId, status])
+  @@index([requestId])
+  @@map("WorkflowRun")
+}
+
+// ─────────────────────────────────────────────────────────────
+// USER EMBEDDING → Cached profile embedding for semantic matching
+// ─────────────────────────────────────────────────────────────
+
+model UserEmbedding {
+  id           String   @id @default(uuid())
+  userId       String   @unique @map("user_id")
+  embedding    Float[]  @default([])
+  profileHash  String?  @map("profile_hash")  // MD5 hash for cache invalidation
+  embeddedAt   DateTime @default(now()) @map("embedded_at")
+
+  user         UserAuth @relation(fields: [userId], references: [id])
+
+  @@map("UserEmbedding")
+}
+
+// ─────────────────────────────────────────────────────────────
+// RESUME EXAMPLES → Reference corpus for RAG pipeline
+// ─────────────────────────────────────────────────────────────
+
+model ResumeExample {
+  id              String   @id @default(uuid())
+  domain          String                        // "Frontend Developer", "Backend Developer", etc.
+  experienceLevel String   @map("experience_level") // "Entry", "Mid", "Senior"
+  summary         String   @db.Text
+  skills          String[] @default([])
+  fullData        Json     @map("full_data")    // Complete resume example as JSON
+  sourceFile      String?  @map("source_file")  // e.g. "frontend.json"
+
+  createdAt       DateTime @default(now())
+
+  @@index([domain, experienceLevel])
+  @@map("ResumeExample")
+}
+
+// ─────────────────────────────────────────────────────────────
+// GENERATED RESUMES → Self-improving dataset (high-quality outputs)
+// ─────────────────────────────────────────────────────────────
+
+model GeneratedResume {
+  id           String   @id @default(uuid())
+  content      Json                           // Full resume JSON (DraftedResume shape)
+  embedding    Float[]  @default([])          // 384-dim embedding from SentenceTransformer
+  score        Int                            // Critic ATS score (0-100)
+  sourceJobId  String?  @map("source_job_id") // Job that triggered this generation
+  domain       String   @default("Unknown")   // For filtered retrieval
+  expLevel     String   @default("Entry") @map("exp_level")
+  createdAt    DateTime @default(now())
+
+  @@index([score])
+  @@index([domain, expLevel])
+  @@map("GeneratedResume")
+}
+
+// ─────────────────────────────────────────────────────────────
+// RESUME EVALUATIONS → Research pipeline score tracking
+// ─────────────────────────────────────────────────────────────
+
+model ResumeEvaluation {
+  id              String   @id @default(uuid())
+  userId          String   @map("user_id")
+  jobId           String   @map("job_id")
+  baseScore       Int      @map("base_score")
+  draftScore      Int      @map("draft_score")
+  finalScore      Int      @map("final_score")
+  iterationScores Int[]    @default([])
+  iterationsUsed  Int      @default(1) @map("iterations_used")
+  ablationMode    String   @default("full") @map("ablation_mode")
+  createdAt       DateTime @default(now())
+
+  @@index([userId])
+  @@index([ablationMode])
+  @@map("ResumeEvaluation")
+}
