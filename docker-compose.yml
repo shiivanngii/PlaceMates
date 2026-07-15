@@ -1,0 +1,47 @@
+services:
+  n8n:
+    image: n8nio/n8n
+    container_name: placemate-n8n
+
+    ports:
+      - "5678:5678"
+
+    env_file:
+      - .env
+
+    environment:
+      - N8N_COMMUNITY_PACKAGES_ALLOW_TOOL_USAGE=true
+      - N8N_DEFAULT_BINARY_DATA_MODE=filesystem
+      - N8N_ENABLE_ENV_ACCESS_IN_NODE=true
+      
+
+    volumes:
+      - C:\Users\kalpesh\.n8n:/home/node/.n8n
+
+    restart: always
+
+  embedding-service:
+    build:
+      context: ./embedding-service
+      dockerfile: Dockerfile
+    container_name: placemate-embedding
+    ports:
+      - "8100:8100"
+    environment:
+      - EMBEDDING_HOST=0.0.0.0
+      - EMBEDDING_PORT=8100
+      - EMBEDDING_MODEL=all-MiniLM-L6-v2
+      - FAISS_INDEX_PATH=/app/data/faiss_index/index.faiss
+      - FAISS_ID_MAP_PATH=/app/data/faiss_index/id_map.json
+      - CHROMA_PERSIST_DIR=/app/data/chroma_db
+    volumes:
+      - embedding-data:/app/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8100/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: always
+
+volumes:
+  embedding-data:
